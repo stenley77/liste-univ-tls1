@@ -1,0 +1,58 @@
+name: Update Multiple Blocklists
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 12 * * 6'  # Every Saturday at 12:00 UTC
+
+jobs:
+  update-blocklists:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y curl tar
+
+    - name: Download and process blocklists
+      run: |
+        # List of archives to process
+        ARCHIVES=("ddos" "adult" "malware" "phishing")
+        
+        for NAME in "${ARCHIVES[@]}"; do
+          ARCHIVE_FILE="${NAME}.tar.gz"
+          OUTPUT_DIR="${NAME}"
+          OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
+
+          echo "Downloading $ARCHIVE_FILE..."
+          curl -o "$ARCHIVE_FILE" "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/${ARCHIVE_FILE}"
+
+          echo "Extracting $ARCHIVE_FILE..."
+          tar -xzf "$ARCHIVE_FILE"
+
+          mkdir -p "$OUTPUT_DIR"
+
+          DOMAINS_FILE=$(find . -type f -name 'domains' -path "*${NAME}*")
+
+          if [[ -f "$DOMAINS_FILE" ]]; then
+            echo "Converting $DOMAINS_FILE to $OUTPUT_FILE..."
+            > "$OUTPUT_FILE"
+            while IFS= read -r domain || [[ -n "$domain" ]]; do
+              if [[ -n "$domain" ]]; then
+                echo "||$domain^" >> "$OUTPUT_FILE"
+              fi
+            done < "$DOMAINS_FILE"
+          else
+            echo "Domains file not found for $NAME, skipping."
+          fi
+        done
+
+    - name: Commit and push changes
+      run: |
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git add ddos/ adult/ malware/ phishing/
+        git commit -m "Update AdGuard Home blocklists" || echo "No changes to commit"
+        git push
