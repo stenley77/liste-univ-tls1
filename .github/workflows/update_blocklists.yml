@@ -18,7 +18,7 @@ jobs:
 
     - name: Download, extract, list and process blocklists
       run: |
-        ARCHIVES=("ddos" "adult" "malware" "phishing")
+        ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
         
         for NAME in "${ARCHIVES[@]}"; do
           ARCHIVE_FILE="${NAME}.tar.gz"
@@ -37,13 +37,7 @@ jobs:
 
           mkdir -p "$OUTPUT_DIR"
 
-          # Correctly locate the domains file
-          if [[ "$NAME" == "malware" ]]; then
-            # Temporary workaround for incorrect archive
-            DOMAINS_FILE="phishing/domains"
-          else
-            DOMAINS_FILE="${NAME}/domains"
-          fi
+          DOMAINS_FILE="${NAME}/domains"
 
           if [[ -f "$DOMAINS_FILE" ]]; then
             echo "Converting $DOMAINS_FILE to $OUTPUT_FILE..."
@@ -61,11 +55,11 @@ jobs:
     - name: Cleanup extracted large files
       run: |
         echo "Cleaning up large extracted files..."
-        rm -rf ddos/domains adult/domains malware/domains phishing/domains
-        rm -rf ddos/usage adult/usage malware/usage phishing/usage
-        rm -rf ddos/urls adult/urls malware/urls phishing/urls
-        rm -rf ddos/expressions adult/expressions malware/expressions phishing/expressions
-        rm -f ddos.tar.gz adult.tar.gz malware.tar.gz phishing.tar.gz
+        rm -rf ddos/domains adult/domains malware/domains mixed_adult/domains
+        rm -rf ddos/usage adult/usage malware/usage mixed_adult/usage
+        rm -rf ddos/urls adult/urls malware/urls mixed_adult/urls
+        rm -rf ddos/expressions adult/expressions malware/expressions mixed_adult/expressions
+        rm -f ddos.tar.gz adult.tar.gz malware.tar.gz mixed_adult.tar.gz
 
     - name: Commit and push changes with splitting large files
       run: |
@@ -75,7 +69,7 @@ jobs:
         MAX_SIZE=104857600      # 100 MB
         SPLIT_SIZE=52428800     # 50 MB
 
-        ARCHIVES=("ddos" "adult" "malware" "phishing")
+        ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
 
         for NAME in "${ARCHIVES[@]}"; do
           OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
