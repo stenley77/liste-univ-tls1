@@ -16,9 +16,8 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y curl tar
 
-    - name: Download and process blocklists
+    - name: Download, extract, list and process blocklists
       run: |
-        # List of archives to process
         ARCHIVES=("ddos" "adult" "malware" "phishing")
         
         for NAME in "${ARCHIVES[@]}"; do
@@ -31,6 +30,10 @@ jobs:
 
           echo "Extracting $ARCHIVE_FILE..."
           tar -xzf "$ARCHIVE_FILE"
+
+          echo "Files extracted from $ARCHIVE_FILE:"
+          tar -tzf "$ARCHIVE_FILE"
+          echo "-----------------------------------"
 
           mkdir -p "$OUTPUT_DIR"
 
