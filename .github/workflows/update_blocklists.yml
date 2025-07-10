@@ -49,10 +49,17 @@ jobs:
           fi
         done
 
+    - name: Cleanup extracted large files
+      run: |
+        echo "Cleaning up large extracted files..."
+        rm -rf ddos/domains adult/domains malware/domains phishing/domains
+        rm -rf ddos/usage adult/usage malware/usage phishing/usage
+        rm -f ddos.tar.gz adult.tar.gz malware.tar.gz phishing.tar.gz
+
     - name: Commit and push changes
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add ddos/ adult/ malware/ phishing/
+        git add **/adguardhome_*
         git commit -m "Update AdGuard Home blocklists" || echo "No changes to commit"
         git push
