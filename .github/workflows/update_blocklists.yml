@@ -37,7 +37,13 @@ jobs:
 
           mkdir -p "$OUTPUT_DIR"
 
-          DOMAINS_FILE=$(find . -type f -name 'domains' -path "*${NAME}*")
+          # Correctly locate the domains file
+          if [[ "$NAME" == "malware" ]]; then
+            # Temporary workaround for incorrect archive
+            DOMAINS_FILE="phishing/domains"
+          else
+            DOMAINS_FILE="${NAME}/domains"
+          fi
 
           if [[ -f "$DOMAINS_FILE" ]]; then
             echo "Converting $DOMAINS_FILE to $OUTPUT_FILE..."
@@ -57,6 +63,8 @@ jobs:
         echo "Cleaning up large extracted files..."
         rm -rf ddos/domains adult/domains malware/domains phishing/domains
         rm -rf ddos/usage adult/usage malware/usage phishing/usage
+        rm -rf ddos/urls adult/urls malware/urls phishing/urls
+        rm -rf ddos/expressions adult/expressions malware/expressions phishing/expressions
         rm -f ddos.tar.gz adult.tar.gz malware.tar.gz phishing.tar.gz
 
     - name: Commit and push changes
