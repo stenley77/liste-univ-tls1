@@ -67,10 +67,33 @@ jobs:
         rm -rf ddos/expressions adult/expressions malware/expressions phishing/expressions
         rm -f ddos.tar.gz adult.tar.gz malware.tar.gz phishing.tar.gz
 
-    - name: Commit and push changes
+    - name: Commit and push changes with splitting large files
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git add **/adguardhome_*
+
+        MAX_SIZE=104857600      # 100 MB
+        SPLIT_SIZE=52428800     # 50 MB
+
+        ARCHIVES=("ddos" "adult" "malware" "phishing")
+
+        for NAME in "${ARCHIVES[@]}"; do
+          OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
+
+          if [[ -f "$OUTPUT_FILE" ]]; then
+            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
+
+            if (( FILE_SIZE > MAX_SIZE )); then
+              echo "$OUTPUT_FILE dépasse 100 Mo, découpage en fichiers plus petits..."
+              rm -f ${OUTPUT_FILE}_part*
+              split -b $SPLIT_SIZE -d -a 2 --additional-suffix="" "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
+              rm "$OUTPUT_FILE"
+              git add "${OUTPUT_FILE}_part"*
+            else
+              git add "$OUTPUT_FILE"
+            fi
+          fi
+        done
+
         git commit -m "Update AdGuard Home blocklists" || echo "No changes to commit"
         git push
