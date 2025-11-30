@@ -39,133 +39,69 @@ jobs:
             TOTAL_LINES=$(wc -l < "$DOMAINS_FILE")
             echo "📥 Source file: $TOTAL_LINES total lines"
             
-            # Ultra-fast single-pass processing with AWK
-            awk '
-            BEGIN {
-              FS = "."
-              OFS = "."
-            }
+            # Fast processing with simple pipeline
+            cat "$DOMAINS_FILE" | \
+            # Remove comments, empty lines, trim whitespace
+            sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | \
+            # Convert to lowercase
+            tr '[:upper:]' '[:lower:]' | \
+            # Remove carriage returns
+            tr -d '\r' | \
+            # Remove IP addresses (simple pattern)
+            grep -vE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | \
+            # Remove entries with invalid characters
+            grep -vE '[\*\(\)\[\]\{\}\\$?|]|https?://|//' | \
+            # Remove port numbers and paths
+            sed -e 's/:[0-9]*$//' -e 's/\/.*$//' | \
+            # Remove existing ||, ^, leading/trailing dots
+            sed -e s'/^|*||*//' -e 's/\^*$//' -e 's/^\.*\|\.*$//' | \
+            # Must contain at least one dot
+            grep '\.' | \
+            # Basic domain validation: alphanumeric, dots, hyphens only
+            grep -E '^[a-z0-9.-]+$' | \
+            # No double dots
+            grep -v '\.\.' | \
+            # Minimum length 4 (x.yy format)
+            awk 'length($0) >= 4 && length($0) <= 253' | \
+            # TLD and second-level domain must be at least 2 chars
+            awk -F. '{if (length($NF) >= 2 && length($(NF-1)) >= 2) print}' | \
+            # Sort and deduplicate
+            sort -u > "${OUTPUT_DIR}/temp_sorted"
             
-            # Skip empty lines, comments, IPs
-            /^[[:space:]]*$/ { next }
-            /^[[:space:]]*#/ { next }
-            /^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/ { next }
+            echo "🔄 Aggregating subdomains..."
             
-            # Skip lines with invalid characters
-            /[\*\(\)\[\]\{\}\\$?|]/ { next }
-            /https?:\/\// { next }
-            /\/\// { next }
-            
-            {
-              # Convert to lowercase and clean
-              line = tolower($0)
-              gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
-              gsub(/\r/, "", line)
-              
-              # Remove port numbers
-              sub(/:[0-9]+$/, "", line)
-              
-              # Remove paths
-              sub(/\/.*$/, "", line)
-              
-              # Remove existing ||, ^, or leading dots
-              gsub(/^\|\|/, "", line)
-              gsub(/\^$/, "", line)
-              gsub(/^\.+|\.+$/, "", line)
-              
-              # Skip if empty after cleaning
-              if (length(line) == 0) next
-              
-              # Must contain at least one dot
-              if (index(line, ".") == 0) next
-              
-              # Validate domain format
-              if (!match(line, /^[a-z0-9.-]+$/)) next
-              
-              # Check for double dots
-              if (index(line, "..") > 0) next
-              
-              # Split and validate
-              split(line, parts, ".")
-              nparts = length(parts)
-              
-              # Must have at least 2 parts
-              if (nparts < 2) next
-              
-              # TLD and second-level must be >= 2 chars
-              tld = parts[nparts]
-              sld = parts[nparts-1]
-              
-              if (length(tld) < 2 || length(sld) < 2) next
-              
-              # Total length check
-              if (length(line) < 4 || length(line) > 253) next
-              
+            # Fast subdomain aggregation with awk
+            awk -F. '{
               # Store domain
-              domains[line] = 1
-            }
-            
-            END {
-              # Sort domains by dot count (fewer dots first for parent domains)
-              n = 0
-              for (domain in domains) {
-                sorted[n++] = domain
-              }
+              domain = $0
+              domains[domain] = 1
               
-              # Bubble sort by dot count (simple but effective for this use case)
-              for (i = 0; i < n-1; i++) {
-                for (j = i+1; j < n; j++) {
-                  count_i = gsub(/\./, ".", sorted[i])
-                  gsub(/[^\.]/, "", temp1); count_i = length(temp1)
-                  
-                  count_j = gsub(/\./, ".", sorted[j])
-                  gsub(/[^\.]/, "", temp2); count_j = length(temp2)
-                  
-                  # Sort by dot count, then alphabetically
-                  split(sorted[i], pi, ".")
-                  split(sorted[j], pj, ".")
-                  
-                  if (length(pi) > length(pj) || (length(pi) == length(pj) && sorted[i] > sorted[j])) {
-                    temp = sorted[i]
-                    sorted[i] = sorted[j]
-                    sorted[j] = temp
-                  }
+              # Store all parent domains
+              n = NF
+              for (i = 2; i <= n; i++) {
+                parent = ""
+                for (j = i; j <= n; j++) {
+                  parent = parent (parent ? "." : "") $j
                 }
+                parents[domain] = parents[domain] " " parent
               }
-              
-              # Aggregate: skip subdomains if parent exists
-              for (i = 0; i < n; i++) {
-                domain = sorted[i]
-                is_subdomain = 0
-                
-                # Check if parent domain exists
-                split(domain, parts, ".")
-                nparts = length(parts)
-                
-                for (level = 2; level <= nparts; level++) {
-                  parent = ""
-                  for (k = nparts - level + 1; k <= nparts; k++) {
-                    parent = parent (parent ? "." : "") parts[k]
-                  }
-                  if (parent != domain && parent in blocked) {
-                    is_subdomain = 1
+            }
+            END {
+              # Output only if no parent domain exists
+              for (domain in domains) {
+                keep = 1
+                split(parents[domain], p, " ")
+                for (i in p) {
+                  if (p[i] != "" && p[i] != domain && p[i] in domains) {
+                    keep = 0
                     break
                   }
                 }
-                
-                if (!is_subdomain) {
-                  blocked[domain] = 1
-                  final[final_count++] = domain
-                }
+                if (keep) print "||" domain "^"
               }
-              
-              # Output in AdGuard format (sorted alphabetically)
-              asort(final, output)
-              for (i = 1; i <= final_count; i++) {
-                print "||" output[i] "^"
-              }
-            }
-            ' "$DOMAINS_FILE" > "$OUTPUT_FILE"
+            }' "${OUTPUT_DIR}/temp_sorted" | sort > "$OUTPUT_FILE"
+            
+            rm -f "${OUTPUT_DIR}/temp_sorted"
             
             FINAL_COUNT=$(wc -l < "$OUTPUT_FILE")
             END_TIME=$(date +%s)
@@ -174,8 +110,10 @@ jobs:
             echo "📤 Final output: $FINAL_COUNT rules"
             echo "⏱️  Processing time: ${ELAPSED}s"
             
-            REDUCTION_PERCENT=$(awk "BEGIN {printf \"%.1f\", (1 - $FINAL_COUNT / $TOTAL_LINES) * 100}")
-            echo "📊 Reduction: ${REDUCTION_PERCENT}%"
+            if [ $TOTAL_LINES -gt 0 ]; then
+              REDUCTION_PERCENT=$(awk "BEGIN {printf \"%.1f\", (1 - $FINAL_COUNT / $TOTAL_LINES) * 100}")
+              echo "📊 Reduction: ${REDUCTION_PERCENT}%"
+            fi
             
             echo ""
             echo "📋 First 10 entries:"
@@ -185,14 +123,6 @@ jobs:
             echo "📋 Last 10 entries:"
             tail -10 "$OUTPUT_FILE"
             
-            if [[ -f "$OUTPUT_FILE.old" ]]; then
-              OLD_COUNT=$(wc -l < "$OUTPUT_FILE.old")
-              echo ""
-              echo "📊 Comparison:"
-              echo "   Old: $OLD_COUNT | New: $FINAL_COUNT | Diff: $((FINAL_COUNT - OLD_COUNT))"
-            fi
-            
-            cp "$OUTPUT_FILE" "$OUTPUT_FILE.old" 2>/dev/null || true
             echo "✅ $NAME complete"
             echo ""
             
