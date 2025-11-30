@@ -33,24 +33,50 @@ jobs:
           DOMAINS_FILE="${NAME}/domains"
           
           if [[ -f "$DOMAINS_FILE" ]]; then
-            # Fast processing with pattern filtering
+            # Fast processing with strict filtering
             cat "$DOMAINS_FILE" | \
             # Remove comments and empty lines
             grep -v '^\s*$\|^\s*#' | \
-            # Remove lines with wildcards or regex patterns
-            grep -v '\*\|(\|)\|\[\|\]\|{\|}\|\\\|\$\|?' | \
+            # Remove lines with wildcards, regex, or special patterns
+            grep -v '\*\|(\|)\|\[\|\]\|{\|}\|\\\|\$\|?\||\||' | \
             # Remove IP addresses
             grep -v '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' | \
-            # Lowercase and trim
+            # Remove single character domains or too short domains
+            awk 'length($0) >= 4' | \
+            # Lowercase and trim whitespace
             tr '[:upper:]' '[:lower:]' | \
             tr -d '\r' | \
             sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-            # Only keep valid FQDN format (at least one dot, no special chars)
+            # Must contain at least 2 parts (TLD and domain)
+            awk -F'.' 'NF >= 2' | \
+            # Only keep valid FQDN format with proper length restrictions
             awk '
               /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/ && 
               length($0) <= 253 && 
-              length($0) >= 4 {print}
+              length($0) >= 4 {
+                # Check that each label is at least 1 char and max 63
+                valid = 1
+                n = split($0, parts, ".")
+                for (i = 1; i <= n; i++) {
+                  if (length(parts[i]) < 1 || length(parts[i]) > 63) {
+                    valid = 0
+                    break
+                  }
+                }
+                if (valid) print
+              }
             ' | \
+            # Remove domains with less than 2 characters in any part (catches "r.com", "a.b.com", etc.)
+            awk -F'.' '{
+              valid = 1
+              for (i = 1; i <= NF; i++) {
+                if (length($i) < 2) {
+                  valid = 0
+                  break
+                }
+              }
+              if (valid) print
+            }' | \
             # Sort and deduplicate
             sort -u | \
             # Convert to AdGuard format
@@ -62,7 +88,7 @@ jobs:
             echo "✗ Domains file not found for $NAME"
           fi
           
-          # Cleanup
+          # Cleanup archive
           rm -f "$ARCHIVE_FILE"
         done
         
@@ -79,8 +105,6 @@ jobs:
 
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
         
-        CHANGES_MADE=false
-
         for NAME in "${ARCHIVES[@]}"; do
           OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
 
@@ -92,20 +116,13 @@ jobs:
               rm -f ${OUTPUT_FILE}_part*
               split -b $SPLIT_SIZE -d -a 2 "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
               rm "$OUTPUT_FILE"
-              
-              # Add all parts
-              for part in ${OUTPUT_FILE}_part*; do
-                git add "$part"
-                CHANGES_MADE=true
-              done
+              git add ${OUTPUT_FILE}_part*
             else
               git add "$OUTPUT_FILE"
-              CHANGES_MADE=true
             fi
           fi
         done
 
-        # Check if there are actual changes to commit
         if git diff --staged --quiet; then
           echo "No changes detected in blocklists"
         else
