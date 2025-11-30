@@ -13,9 +13,6 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y curl tar
-
     - name: Download, extract, and process blocklists
       run: |
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
@@ -24,88 +21,53 @@ jobs:
           ARCHIVE_FILE="${NAME}.tar.gz"
           OUTPUT_DIR="${NAME}"
           OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
-          TEMP_FILE="${OUTPUT_DIR}/temp_${NAME}"
 
-          echo "Downloading $ARCHIVE_FILE..."
-          curl -o "$ARCHIVE_FILE" "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/${ARCHIVE_FILE}"
-
-          echo "Extracting $ARCHIVE_FILE..."
-          tar -xzf "$ARCHIVE_FILE"
-
+          echo "Processing $NAME..."
+          
           mkdir -p "$OUTPUT_DIR"
-
+          
+          # Download and extract
+          curl -s "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/${ARCHIVE_FILE}" -o "$ARCHIVE_FILE"
+          tar -xzf "$ARCHIVE_FILE"
+          
           DOMAINS_FILE="${NAME}/domains"
-
+          
           if [[ -f "$DOMAINS_FILE" ]]; then
-            echo "Processing $DOMAINS_FILE..."
-            
-            # Step 1: Clean, validate, and normalize domains
-            > "$TEMP_FILE"
-            grep -v '^\s*$\|^\s*#' "$DOMAINS_FILE" | \
+            # Fast processing with pattern filtering
+            cat "$DOMAINS_FILE" | \
+            # Remove comments and empty lines
+            grep -v '^\s*$\|^\s*#' | \
+            # Remove lines with wildcards or regex patterns
+            grep -v '\*\|(\|)\|\[\|\]\|{\|}\|\\\|\$\|?' | \
+            # Remove IP addresses
+            grep -v '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' | \
+            # Lowercase and trim
             tr '[:upper:]' '[:lower:]' | \
             tr -d '\r' | \
-            awk '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/ {print}' | \
-            sort -u > "$TEMP_FILE"
-            
-            # Step 2: Fast subdomain removal using reverse domain sorting
-            echo "Optimizing domain list..."
-            
+            sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
+            # Only keep valid FQDN format (at least one dot, no special chars)
             awk '
-            BEGIN {
-              FS = "."
-            }
-            {
-              # Reverse the domain for efficient parent matching
-              reversed = ""
-              for (i = NF; i >= 1; i--) {
-                if (reversed != "") reversed = reversed "."
-                reversed = reversed $i
-              }
-              print reversed, $0
-            }
-            ' "$TEMP_FILE" | \
-            sort -t' ' -k1,1 | \
-            awk '
-            {
-              reversed = $1
-              original = $2
-              
-              # Check if this domain is a subdomain of the previous one
-              if (prev_reversed != "" && index(reversed, prev_reversed ".") == 1) {
-                # This is a subdomain of previous domain, skip it
-                skipped++
-                next
-              }
-              
-              # This is a new parent domain
-              prev_reversed = reversed
-              print "||" original "^"
-              kept++
-            }
-            END {
-              if (skipped > 0) {
-                print "# Removed " skipped " redundant subdomains" > "/dev/stderr"
-              }
-            }
-            ' > "$OUTPUT_FILE"
+              /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/ && 
+              length($0) <= 253 && 
+              length($0) >= 4 {print}
+            ' | \
+            # Sort and deduplicate
+            sort -u | \
+            # Convert to AdGuard format
+            sed 's/^/||/;s/$/^/' > "$OUTPUT_FILE"
             
-            ORIGINAL_COUNT=$(wc -l < "$TEMP_FILE")
-            OPTIMIZED_COUNT=$(wc -l < "$OUTPUT_FILE")
-            SAVED=$((ORIGINAL_COUNT - OPTIMIZED_COUNT))
-            
-            echo "✓ $NAME: $ORIGINAL_COUNT domains → $OPTIMIZED_COUNT rules (saved $SAVED redundant entries)"
-            
-            rm "$TEMP_FILE"
+            DOMAIN_COUNT=$(wc -l < "$OUTPUT_FILE")
+            echo "✓ $NAME: $DOMAIN_COUNT valid domains"
           else
-            echo "Domains file not found for $NAME, skipping."
+            echo "✗ Domains file not found for $NAME"
           fi
+          
+          # Cleanup
+          rm -f "$ARCHIVE_FILE"
         done
-
-    - name: Cleanup extracted files
-      run: |
-        echo "Cleaning up extracted files..."
+        
+        # Remove all extracted directories
         rm -rf ddos adult malware mixed_adult
-        rm -f *.tar.gz
 
     - name: Commit and push changes
       run: |
@@ -116,6 +78,8 @@ jobs:
         SPLIT_SIZE=52428800     # 50 MB
 
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
+        
+        CHANGES_MADE=false
 
         for NAME in "${ARCHIVES[@]}"; do
           OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
@@ -124,20 +88,28 @@ jobs:
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
 
             if (( FILE_SIZE > MAX_SIZE )); then
-              echo "$OUTPUT_FILE exceeds 100 MB, splitting..."
+              echo "$OUTPUT_FILE exceeds 100 MB, splitting into parts..."
               rm -f ${OUTPUT_FILE}_part*
-              split -b $SPLIT_SIZE -d -a 2 --additional-suffix="" "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
+              split -b $SPLIT_SIZE -d -a 2 "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
               rm "$OUTPUT_FILE"
-              git add "${OUTPUT_FILE}_part"*
+              
+              # Add all parts
+              for part in ${OUTPUT_FILE}_part*; do
+                git add "$part"
+                CHANGES_MADE=true
+              done
             else
               git add "$OUTPUT_FILE"
+              CHANGES_MADE=true
             fi
           fi
         done
 
+        # Check if there are actual changes to commit
         if git diff --staged --quiet; then
-          echo "No changes to commit"
+          echo "No changes detected in blocklists"
         else
-          git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d')]"
+          git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d %H:%M UTC')]"
           git push
+          echo "✓ Blocklists updated and pushed successfully"
         fi
