@@ -23,7 +23,9 @@ jobs:
           OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
           TEMP_FILE="${OUTPUT_DIR}/temp_new_${NAME}"
 
+          echo "==========================================="
           echo "Processing $NAME..."
+          echo "==========================================="
           
           mkdir -p "$OUTPUT_DIR"
           
@@ -34,28 +36,36 @@ jobs:
           DOMAINS_FILE="${NAME}/domains"
           
           if [[ -f "$DOMAINS_FILE" ]]; then
-            # Fast processing with strict filtering - output to TEMP file first
+            TOTAL_LINES=$(wc -l < "$DOMAINS_FILE")
+            echo "📥 Source file: $TOTAL_LINES total lines"
+            
+            # Show sample of problematic entries that will be filtered
+            echo ""
+            echo "🔍 Sample of SHORT entries (< 6 chars) in source:"
+            cat "$DOMAINS_FILE" | grep -v '^\s*$\|^\s*#' | awk 'length($0) < 6' | head -10 || echo "  (none found)"
+            
+            echo ""
+            echo "🔍 Sample of entries with WILDCARDS:"
+            cat "$DOMAINS_FILE" | grep '\*' | head -10 || echo "  (none found)"
+            
+            echo ""
+            echo "🔍 Sample of entries with SINGLE-CHAR labels:"
+            cat "$DOMAINS_FILE" | grep -E '(^|\.)[a-z](\.|$)' | head -10 || echo "  (none found)"
+            
+            # Process with filters
             cat "$DOMAINS_FILE" | \
-            # Remove comments and empty lines
             grep -v '^\s*$\|^\s*#' | \
-            # Remove lines with wildcards, regex, or special patterns
             grep -v '\*\|(\|)\|\[\|\]\|{\|}\|\\\|\$\|?\||\||' | \
-            # Remove IP addresses
             grep -v '^[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}' | \
-            # Remove single character domains or too short domains
             awk 'length($0) >= 4' | \
-            # Lowercase and trim whitespace
             tr '[:upper:]' '[:lower:]' | \
             tr -d '\r' | \
             sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | \
-            # Must contain at least 2 parts (TLD and domain)
             awk -F'.' 'NF >= 2' | \
-            # Only keep valid FQDN format with proper length restrictions
             awk '
               /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/ && 
               length($0) <= 253 && 
               length($0) >= 4 {
-                # Check that each label is at least 1 char and max 63
                 valid = 1
                 n = split($0, parts, ".")
                 for (i = 1; i <= n; i++) {
@@ -67,7 +77,6 @@ jobs:
                 if (valid) print
               }
             ' | \
-            # CRITICAL: Remove domains with less than 2 characters in any part
             awk -F'.' '{
               valid = 1
               for (i = 1; i <= NF; i++) {
@@ -78,25 +87,47 @@ jobs:
               }
               if (valid) print
             }' | \
-            # Sort and deduplicate
             sort -u | \
-            # Convert to AdGuard format
             sed 's/^/||/;s/$/^/' > "$TEMP_FILE"
             
-            DOMAIN_COUNT=$(wc -l < "$TEMP_FILE")
-            echo "✓ $NAME: $DOMAIN_COUNT valid domains"
+            NEW_COUNT=$(wc -l < "$TEMP_FILE")
+            echo ""
+            echo "📤 After filtering: $NEW_COUNT valid domains"
             
-            # Replace old file with new one (force update)
+            if [[ -f "$OUTPUT_FILE" ]]; then
+              OLD_COUNT=$(wc -l < "$OUTPUT_FILE")
+              DIFF_COUNT=$((NEW_COUNT - OLD_COUNT))
+              echo "📊 Comparison:"
+              echo "   Old file: $OLD_COUNT domains"
+              echo "   New file: $NEW_COUNT domains"
+              echo "   Difference: $DIFF_COUNT domains"
+              
+              # Show sample differences
+              echo ""
+              echo "🔍 Sample entries REMOVED (in old, not in new):"
+              comm -23 <(sort "$OUTPUT_FILE") <(sort "$TEMP_FILE") | head -10 || echo "  (none)"
+              
+              echo ""
+              echo "🔍 Sample entries ADDED (in new, not in old):"
+              comm -13 <(sort "$OUTPUT_FILE") <(sort "$TEMP_FILE") | head -10 || echo "  (none)"
+            else
+              echo "📊 New file created: $NEW_COUNT domains"
+            fi
+            
+            # Replace old file with new one
             mv "$TEMP_FILE" "$OUTPUT_FILE"
+            
+            echo ""
+            echo "✅ $NAME processing complete"
+            
           else
-            echo "✗ Domains file not found for $NAME"
+            echo "❌ Domains file not found: $DOMAINS_FILE"
           fi
           
-          # Cleanup archive
           rm -f "$ARCHIVE_FILE"
+          echo ""
         done
         
-        # Remove all extracted directories
         rm -rf ddos adult malware mixed_adult
 
     - name: Commit and push changes
@@ -104,17 +135,15 @@ jobs:
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-        MAX_SIZE=104857600      # 100 MB
-        SPLIT_SIZE=52428800     # 50 MB
+        MAX_SIZE=104857600
+        SPLIT_SIZE=52428800
 
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
-        CHANGES_MADE=false
         
         for NAME in "${ARCHIVES[@]}"; do
           OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
 
           if [[ -f "$OUTPUT_FILE" ]]; then
-            # Remove old split files if they exist
             rm -f ${OUTPUT_FILE}_part*
             
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
@@ -127,19 +156,29 @@ jobs:
             else
               git add "$OUTPUT_FILE"
             fi
-            
-            CHANGES_MADE=true
           fi
         done
 
-        # Check for actual content changes (not just timestamp)
         if git diff --cached --quiet; then
-          echo "No content changes detected in blocklists"
+          echo ""
+          echo "============================================"
+          echo "⚠️  NO CONTENT CHANGES DETECTED"
+          echo "============================================"
+          echo "This means the filtering produced identical results."
+          echo "The source blocklists may already be clean, OR"
+          echo "the filters are not catching the problematic entries."
+          echo ""
+          echo "Git status:"
+          git status --short
         else
           CHANGED_FILES=$(git diff --cached --name-only | wc -l)
-          echo "Detected changes in $CHANGED_FILES file(s)"
+          echo ""
+          echo "============================================"
+          echo "✅ CHANGES DETECTED: $CHANGED_FILES file(s)"
+          echo "============================================"
           git diff --cached --stat
           git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d %H:%M UTC')]"
           git push
-          echo "✓ Blocklists updated and pushed successfully"
+          echo ""
+          echo "✅ Blocklists updated and pushed successfully"
         fi
