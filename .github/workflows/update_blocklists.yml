@@ -21,6 +21,7 @@ jobs:
           ARCHIVE_FILE="${NAME}.tar.gz"
           OUTPUT_DIR="${NAME}"
           OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
+          TEMP_FILE="${OUTPUT_DIR}/temp_new_${NAME}"
 
           echo "Processing $NAME..."
           
@@ -33,7 +34,7 @@ jobs:
           DOMAINS_FILE="${NAME}/domains"
           
           if [[ -f "$DOMAINS_FILE" ]]; then
-            # Fast processing with strict filtering
+            # Fast processing with strict filtering - output to TEMP file first
             cat "$DOMAINS_FILE" | \
             # Remove comments and empty lines
             grep -v '^\s*$\|^\s*#' | \
@@ -66,7 +67,7 @@ jobs:
                 if (valid) print
               }
             ' | \
-            # Remove domains with less than 2 characters in any part (catches "r.com", "a.b.com", etc.)
+            # CRITICAL: Remove domains with less than 2 characters in any part
             awk -F'.' '{
               valid = 1
               for (i = 1; i <= NF; i++) {
@@ -80,10 +81,13 @@ jobs:
             # Sort and deduplicate
             sort -u | \
             # Convert to AdGuard format
-            sed 's/^/||/;s/$/^/' > "$OUTPUT_FILE"
+            sed 's/^/||/;s/$/^/' > "$TEMP_FILE"
             
-            DOMAIN_COUNT=$(wc -l < "$OUTPUT_FILE")
+            DOMAIN_COUNT=$(wc -l < "$TEMP_FILE")
             echo "✓ $NAME: $DOMAIN_COUNT valid domains"
+            
+            # Replace old file with new one (force update)
+            mv "$TEMP_FILE" "$OUTPUT_FILE"
           else
             echo "✗ Domains file not found for $NAME"
           fi
@@ -104,28 +108,37 @@ jobs:
         SPLIT_SIZE=52428800     # 50 MB
 
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
+        CHANGES_MADE=false
         
         for NAME in "${ARCHIVES[@]}"; do
           OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
 
           if [[ -f "$OUTPUT_FILE" ]]; then
+            # Remove old split files if they exist
+            rm -f ${OUTPUT_FILE}_part*
+            
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
 
             if (( FILE_SIZE > MAX_SIZE )); then
               echo "$OUTPUT_FILE exceeds 100 MB, splitting into parts..."
-              rm -f ${OUTPUT_FILE}_part*
               split -b $SPLIT_SIZE -d -a 2 "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
               rm "$OUTPUT_FILE"
               git add ${OUTPUT_FILE}_part*
             else
               git add "$OUTPUT_FILE"
             fi
+            
+            CHANGES_MADE=true
           fi
         done
 
-        if git diff --staged --quiet; then
-          echo "No changes detected in blocklists"
+        # Check for actual content changes (not just timestamp)
+        if git diff --cached --quiet; then
+          echo "No content changes detected in blocklists"
         else
+          CHANGED_FILES=$(git diff --cached --name-only | wc -l)
+          echo "Detected changes in $CHANGED_FILES file(s)"
+          git diff --cached --stat
           git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d %H:%M UTC')]"
           git push
           echo "✓ Blocklists updated and pushed successfully"
