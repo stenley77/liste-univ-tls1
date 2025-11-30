@@ -39,54 +39,55 @@ jobs:
           if [[ -f "$DOMAINS_FILE" ]]; then
             echo "Processing $DOMAINS_FILE..."
             
-            # Step 1: Clean and validate domains
+            # Step 1: Clean, validate, and normalize domains
             > "$TEMP_FILE"
-            while IFS= read -r domain || [[ -n "$domain" ]]; do
-              # Skip empty lines, comments, and whitespace
-              [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
-              
-              # Remove whitespace and convert to lowercase
-              domain=$(echo "$domain" | xargs | tr '[:upper:]' '[:lower:]')
-              
-              # Validate domain format
-              [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] && continue
-              
-              echo "$domain" >> "$TEMP_FILE"
-            done < "$DOMAINS_FILE"
+            grep -v '^\s*$\|^\s*#' "$DOMAINS_FILE" | \
+            tr '[:upper:]' '[:lower:]' | \
+            tr -d '\r' | \
+            awk '/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/ {print}' | \
+            sort -u > "$TEMP_FILE"
             
-            # Step 2: Sort and deduplicate
-            sort -u "$TEMP_FILE" -o "$TEMP_FILE"
-            
-            # Step 3: Remove subdomains when parent domain exists
-            echo "Optimizing domain list (removing redundant subdomains)..."
-            > "$OUTPUT_FILE"
+            # Step 2: Fast subdomain removal using reverse domain sorting
+            echo "Optimizing domain list..."
             
             awk '
+            BEGIN {
+              FS = "."
+            }
             {
-              domain = $0
-              # Check if any parent domain already exists
-              is_subdomain = 0
-              split(domain, parts, ".")
+              # Reverse the domain for efficient parent matching
+              reversed = ""
+              for (i = NF; i >= 1; i--) {
+                if (reversed != "") reversed = reversed "."
+                reversed = reversed $i
+              }
+              print reversed, $0
+            }
+            ' "$TEMP_FILE" | \
+            sort -t' ' -k1,1 | \
+            awk '
+            {
+              reversed = $1
+              original = $2
               
-              # Build parent domains
-              for (i = 2; i <= length(parts); i++) {
-                parent = ""
-                for (j = i; j <= length(parts); j++) {
-                  if (parent != "") parent = parent "."
-                  parent = parent parts[j]
-                }
-                if (domains[parent]) {
-                  is_subdomain = 1
-                  break
-                }
+              # Check if this domain is a subdomain of the previous one
+              if (prev_reversed != "" && index(reversed, prev_reversed ".") == 1) {
+                # This is a subdomain of previous domain, skip it
+                skipped++
+                next
               }
               
-              if (!is_subdomain) {
-                domains[domain] = 1
-                print "||" domain "^"
+              # This is a new parent domain
+              prev_reversed = reversed
+              print "||" original "^"
+              kept++
+            }
+            END {
+              if (skipped > 0) {
+                print "# Removed " skipped " redundant subdomains" > "/dev/stderr"
               }
             }
-            ' "$TEMP_FILE" >> "$OUTPUT_FILE"
+            ' > "$OUTPUT_FILE"
             
             ORIGINAL_COUNT=$(wc -l < "$TEMP_FILE")
             OPTIMIZED_COUNT=$(wc -l < "$OUTPUT_FILE")
