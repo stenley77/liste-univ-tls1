@@ -16,7 +16,7 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y curl tar
 
-    - name: Download, extract, list and process blocklists
+    - name: Download, extract, and process blocklists
       run: |
         ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
         
@@ -24,6 +24,7 @@ jobs:
           ARCHIVE_FILE="${NAME}.tar.gz"
           OUTPUT_DIR="${NAME}"
           OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
+          TEMP_FILE="${OUTPUT_DIR}/temp_${NAME}"
 
           echo "Downloading $ARCHIVE_FILE..."
           curl -o "$ARCHIVE_FILE" "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/${ARCHIVE_FILE}"
@@ -31,37 +32,81 @@ jobs:
           echo "Extracting $ARCHIVE_FILE..."
           tar -xzf "$ARCHIVE_FILE"
 
-          echo "Files extracted from $ARCHIVE_FILE:"
-          tar -tzf "$ARCHIVE_FILE"
-          echo "-----------------------------------"
-
           mkdir -p "$OUTPUT_DIR"
 
           DOMAINS_FILE="${NAME}/domains"
 
           if [[ -f "$DOMAINS_FILE" ]]; then
-            echo "Converting $DOMAINS_FILE to $OUTPUT_FILE..."
-            > "$OUTPUT_FILE"
+            echo "Processing $DOMAINS_FILE..."
+            
+            # Step 1: Clean and validate domains
+            > "$TEMP_FILE"
             while IFS= read -r domain || [[ -n "$domain" ]]; do
-              if [[ -n "$domain" ]]; then
-                echo "||$domain^" >> "$OUTPUT_FILE"
-              fi
+              # Skip empty lines, comments, and whitespace
+              [[ -z "$domain" || "$domain" =~ ^[[:space:]]*# ]] && continue
+              
+              # Remove whitespace and convert to lowercase
+              domain=$(echo "$domain" | xargs | tr '[:upper:]' '[:lower:]')
+              
+              # Validate domain format
+              [[ ! "$domain" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$ ]] && continue
+              
+              echo "$domain" >> "$TEMP_FILE"
             done < "$DOMAINS_FILE"
+            
+            # Step 2: Sort and deduplicate
+            sort -u "$TEMP_FILE" -o "$TEMP_FILE"
+            
+            # Step 3: Remove subdomains when parent domain exists
+            echo "Optimizing domain list (removing redundant subdomains)..."
+            > "$OUTPUT_FILE"
+            
+            awk '
+            {
+              domain = $0
+              # Check if any parent domain already exists
+              is_subdomain = 0
+              split(domain, parts, ".")
+              
+              # Build parent domains
+              for (i = 2; i <= length(parts); i++) {
+                parent = ""
+                for (j = i; j <= length(parts); j++) {
+                  if (parent != "") parent = parent "."
+                  parent = parent parts[j]
+                }
+                if (domains[parent]) {
+                  is_subdomain = 1
+                  break
+                }
+              }
+              
+              if (!is_subdomain) {
+                domains[domain] = 1
+                print "||" domain "^"
+              }
+            }
+            ' "$TEMP_FILE" >> "$OUTPUT_FILE"
+            
+            ORIGINAL_COUNT=$(wc -l < "$TEMP_FILE")
+            OPTIMIZED_COUNT=$(wc -l < "$OUTPUT_FILE")
+            SAVED=$((ORIGINAL_COUNT - OPTIMIZED_COUNT))
+            
+            echo "✓ $NAME: $ORIGINAL_COUNT domains → $OPTIMIZED_COUNT rules (saved $SAVED redundant entries)"
+            
+            rm "$TEMP_FILE"
           else
             echo "Domains file not found for $NAME, skipping."
           fi
         done
 
-    - name: Cleanup extracted large files
+    - name: Cleanup extracted files
       run: |
-        echo "Cleaning up large extracted files..."
-        rm -rf ddos/domains adult/domains malware/domains mixed_adult/domains
-        rm -rf ddos/usage adult/usage malware/usage mixed_adult/usage
-        rm -rf ddos/urls adult/urls malware/urls mixed_adult/urls
-        rm -rf ddos/expressions adult/expressions malware/expressions mixed_adult/expressions
-        rm -f ddos.tar.gz adult.tar.gz malware.tar.gz mixed_adult.tar.gz
+        echo "Cleaning up extracted files..."
+        rm -rf ddos adult malware mixed_adult
+        rm -f *.tar.gz
 
-    - name: Commit and push changes with splitting large files
+    - name: Commit and push changes
       run: |
         git config --global user.name "github-actions[bot]"
         git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -78,7 +123,7 @@ jobs:
             FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
 
             if (( FILE_SIZE > MAX_SIZE )); then
-              echo "$OUTPUT_FILE dépasse 100 Mo, découpage en fichiers plus petits..."
+              echo "$OUTPUT_FILE exceeds 100 MB, splitting..."
               rm -f ${OUTPUT_FILE}_part*
               split -b $SPLIT_SIZE -d -a 2 --additional-suffix="" "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
               rm "$OUTPUT_FILE"
@@ -89,5 +134,9 @@ jobs:
           fi
         done
 
-        git commit -m "Update AdGuard Home blocklists" || echo "No changes to commit"
-        git push
+        if git diff --staged --quiet; then
+          echo "No changes to commit"
+        else
+          git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d')]"
+          git push
+        fi
