@@ -1,174 +1,211 @@
-name: Update Multiple Blocklists
+name: Update AdGuard Blocklists
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: '0 12 * * 6'  # Every Saturday at 12:00 UTC
+    - cron: '0 12 * * 6'  # Samedi à 12h UTC comme le projet source
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths: 
+      - 'src/**'
+      - '.github/workflows/**'
 
 jobs:
   update-blocklists:
     runs-on: ubuntu-latest
-
+    
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Download, extract, and process blocklists
-      run: |
-        ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
-        
-        for NAME in "${ARCHIVES[@]}"; do
-          ARCHIVE_FILE="${NAME}.tar.gz"
-          OUTPUT_DIR="${NAME}"
-          OUTPUT_FILE="${OUTPUT_DIR}/adguardhome_${NAME}"
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          cache: 'pip'
 
-          echo "==========================================="
-          echo "Processing $NAME..."
-          echo "==========================================="
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/requirements.txt
+
+      - name: Create output directories
+        run: |
+          mkdir -p output/adguard/adult
+          mkdir -p output/adguard/malware
+          mkdir -p output/adguard/mixed_adult
+          mkdir -p output/adguard/ddos
+
+      - name: Run blacklist converter
+        run: |
+          python src/blacklist_converter.py --verbose
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Generate statistics and README
+        run: |
+          echo "# 🛡️ AdGuard Blocklists - UT Capitole" > output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          echo "Listes de blocage AdGuardHome générées à partir des [listes noires de l'Université Toulouse 1 Capitole](ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/)." >> output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          echo "**Dernière mise à jour:** $(date -u '+%Y-%m-%d %H:%M UTC')" >> output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          echo "## 📊 Statistiques" >> output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          echo "| Catégorie | Fichier | Règles | Taille |" >> output/adguard/README.md
+          echo "|-----------|---------|--------|--------|" >> output/adguard/README.md
           
-          START_TIME=$(date +%s)
-          mkdir -p "$OUTPUT_DIR"
-          
-          # Download and extract
-          curl -s "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/${ARCHIVE_FILE}" -o "$ARCHIVE_FILE"
-          tar -xzf "$ARCHIVE_FILE"
-          
-          DOMAINS_FILE="${NAME}/domains"
-          
-          if [[ -f "$DOMAINS_FILE" ]]; then
-            TOTAL_LINES=$(wc -l < "$DOMAINS_FILE")
-            echo "📥 Source file: $TOTAL_LINES total lines"
-            
-            # Fast processing with simple pipeline
-            cat "$DOMAINS_FILE" | \
-            sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' | \
-            tr '[:upper:]' '[:lower:]' | \
-            tr -d '\r' | \
-            grep -vE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | \
-            grep -vE '[\*\(\)\[\]\{\}\\$?|]|https?://|//' | \
-            sed -e 's/:[0-9]*$//' -e 's/\/.*$//' | \
-            sed -e 's/^|*||*//' -e 's/\^*$//' -e 's/^\.*\|\.*$//' | \
-            grep '\.' | \
-            grep -E '^[a-z0-9.-]+$' | \
-            grep -v '\.\.' | \
-            awk 'length($0) >= 4 && length($0) <= 253' | \
-            awk -F. '{if (length($NF) >= 2 && length($(NF-1)) >= 2) print}' | \
-            sort -u > "${OUTPUT_DIR}/temp_sorted"
-            
-            echo "🔄 Aggregating subdomains..."
-            
-            # Fast subdomain aggregation
-            awk -F. '{
-              domain = $0
-              domains[domain] = 1
-              
-              n = NF
-              for (i = 2; i <= n; i++) {
-                parent = ""
-                for (j = i; j <= n; j++) {
-                  parent = parent (parent ? "." : "") $j
-                }
-                parents[domain] = parents[domain] " " parent
-              }
-            }
-            END {
-              for (domain in domains) {
-                keep = 1
-                split(parents[domain], p, " ")
-                for (i in p) {
-                  if (p[i] != "" && p[i] != domain && p[i] in domains) {
-                    keep = 0
-                    break
-                  }
-                }
-                if (keep) print "||" domain "^"
-              }
-            }' "${OUTPUT_DIR}/temp_sorted" | sort > "$OUTPUT_FILE"
-            
-            rm -f "${OUTPUT_DIR}/temp_sorted"
-            
-            FINAL_COUNT=$(wc -l < "$OUTPUT_FILE")
-            END_TIME=$(date +%s)
-            ELAPSED=$((END_TIME - START_TIME))
-            
-            echo "📤 Final output: $FINAL_COUNT rules"
-            echo "⏱️  Processing time: ${ELAPSED}s"
-            
-            if [ $TOTAL_LINES -gt 0 ]; then
-              REDUCTION_PERCENT=$(awk "BEGIN {printf \"%.1f\", (1 - $FINAL_COUNT / $TOTAL_LINES) * 100}")
-              echo "📊 Reduction: ${REDUCTION_PERCENT}%"
+          for category in adult malware mixed_adult ddos; do
+            category_dir="output/adguard/$category"
+            if [ -d "$category_dir" ]; then
+              for file in "$category_dir"/*; do
+                if [ -f "$file" ]; then
+                  filename=$(basename "$file")
+                  rules=$(grep -c "^||.*\^$" "$file" 2>/dev/null || echo "0")
+                  size=$(stat -c%s "$file" | numfmt --to=iec)
+                  rel_path="${category}/${filename}"
+                  echo "| $category | [\`$filename\`]($rel_path) | $rules | $size |" >> output/adguard/README.md
+                fi
+              done
             fi
-            
-            echo ""
-            echo "📋 First 10 entries:"
-            head -10 "$OUTPUT_FILE"
-            
-            echo ""
-            echo "📋 Last 10 entries:"
-            tail -10 "$OUTPUT_FILE"
-            
-            echo "✅ $NAME complete"
-            echo ""
-            
+          done
+          
+          echo "" >> output/adguard/README.md
+          echo "## 🚀 Utilisation" >> output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          echo "### URLs pour AdGuardHome:" >> output/adguard/README.md
+          echo "" >> output/adguard/README.md
+          
+          for category in adult malware mixed_adult ddos; do
+            echo "**$category:**" >> output/adguard/README.md
+            category_dir="output/adguard/$category"
+            if [ -d "$category_dir" ]; then
+              for file in "$category_dir"/adguardhome_*; do
+                if [ -f "$file" ]; then
+                  filename=$(basename "$file")
+                  echo "- \`https://raw.githubusercontent.com/${{ github.repository }}/main/output/adguard/$category/$filename\`" >> output/adguard/README.md
+                fi
+              done
+            fi
+            echo "" >> output/adguard/README.md
+          done
+
+      - name: Validate output files
+        run: |
+          echo "🔍 Validation des fichiers générés..."
+          error_count=0
+          
+          for category in adult malware mixed_adult ddos; do
+            category_dir="output/adguard/$category"
+            if [ -d "$category_dir" ]; then
+              for file in "$category_dir"/*; do
+                if [ -f "$file" ]; then
+                  echo "Validation de $file..."
+                  
+                  # Vérification du format AdGuard
+                  if ! grep -q "^||.*\^$" "$file"; then
+                    echo "❌ Aucune règle AdGuard trouvée dans $file"
+                    ((error_count++))
+                  fi
+                  
+                  # Vérification de l'en-tête
+                  if ! grep -q "^! Title:" "$file"; then
+                    echo "❌ En-tête manquant dans $file"
+                    ((error_count++))
+                  fi
+                fi
+              done
+            fi
+          done
+          
+          if [ $error_count -gt 0 ]; then
+            echo "❌ $error_count erreur(s) détectée(s)"
+            exit 1
           else
-            echo "❌ Domains file not found: $DOMAINS_FILE"
+            echo "✅ Tous les fichiers sont valides"
           fi
+
+      - name: Setup Git config
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Handle large files and commit
+        run: |
+          # Suppression des anciens fichiers splittés
+          find output/adguard -name "*_part*" -delete
           
-          # Clean up archive and extracted source (keep only output file)
-          rm -f "$ARCHIVE_FILE"
-          rm -rf "${NAME}/domains" "${NAME}/urls" "${NAME}/expressions"
-        done
-
-    - name: Commit and push changes
-      run: |
-        git config --global user.name "github-actions[bot]"
-        git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-        MAX_SIZE=104857600
-        SPLIT_SIZE=52428800
-
-        ARCHIVES=("ddos" "adult" "malware" "mixed_adult")
-        
-        for NAME in "${ARCHIVES[@]}"; do
-          OUTPUT_FILE="${NAME}/adguardhome_${NAME}"
-
-          if [[ -f "$OUTPUT_FILE" ]]; then
-            # Remove old split files
-            rm -f ${OUTPUT_FILE}_part*
-            
-            FILE_SIZE=$(stat -c%s "$OUTPUT_FILE")
-
-            if (( FILE_SIZE > MAX_SIZE )); then
-              echo "📦 $OUTPUT_FILE exceeds 100 MB ($(numfmt --to=iec $FILE_SIZE)), splitting..."
-              split -b $SPLIT_SIZE -d -a 2 "$OUTPUT_FILE" "${OUTPUT_FILE}_part"
-              rm "$OUTPUT_FILE"
-              
-              # Show split files info
-              echo "Split into $(ls ${OUTPUT_FILE}_part* | wc -l) parts:"
-              ls -lh ${OUTPUT_FILE}_part*
-              
-              git add ${OUTPUT_FILE}_part*
-            else
-              echo "✓ $OUTPUT_FILE size OK ($(numfmt --to=iec $FILE_SIZE))"
-              git add "$OUTPUT_FILE"
+          MAX_SIZE=104857600  # 100MB
+          SPLIT_SIZE=52428800  # 50MB
+          
+          for category in adult malware mixed_adult ddos; do
+            category_dir="output/adguard/$category"
+            if [ -d "$category_dir" ]; then
+              for file in "$category_dir"/adguardhome_*; do
+                if [ -f "$file" ] && [[ ! "$file" == *"_part"* ]]; then
+                  file_size=$(stat -c%s "$file")
+                  if (( file_size > MAX_SIZE )); then
+                    echo "📦 $file dépasse 100MB ($(numfmt --to=iec $file_size)), division..."
+                    split -b $SPLIT_SIZE -d -a 2 "$file" "${file}_part"
+                    rm "$file"
+                    echo "✅ Divisé en $(ls ${file}_part* | wc -l) parties"
+                    git add ${file}_part*
+                  else
+                    echo "✅ $file OK ($(numfmt --to=iec $file_size))"
+                    git add "$file"
+                  fi
+                fi
+              done
             fi
-          fi
-        done
+          done
+          
+          git add output/adguard/README.md
 
-        # Check if there are actual changes
-        if git diff --cached --quiet; then
-          echo "⚠️ No content changes detected"
-        else
-          CHANGED_FILES=$(git diff --cached --name-only | wc -l)
-          echo ""
-          echo "✅ Changes detected in $CHANGED_FILES file(s):"
-          git diff --cached --name-status
-          echo ""
-          git diff --cached --stat
+      - name: Commit and push changes
+        run: |
+          if git diff --cached --quiet; then
+            echo "⚠️ Aucun changement détecté"
+          else
+            changed_files=$(git diff --cached --name-only | wc -l)
+            echo "✅ Changements détectés dans $changed_files fichier(s):"
+            git diff --cached --name-status
+            echo ""
+            git diff --cached --stat
+            
+            commit_msg="🤖 Update AdGuard Home blocklists [$(date +'%Y-%m-%d %H:%M UTC')]"
+            git commit -m "$commit_msg"
+            git push
+            
+            echo "✅ Listes mises à jour et publiées avec succès"
+          fi
+
+  validate-lists:
+    runs-on: ubuntu-latest
+    needs: update-blocklists
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Test list accessibility
+        run: |
+          echo "🧪 Test d'accessibilité des listes..."
+          base_url="https://raw.githubusercontent.com/${{ github.repository }}/main/output/adguard"
           
-          git commit -m "Update AdGuard Home blocklists [$(date +'%Y-%m-%d %H:%M UTC')]"
-          git push
-          
-          echo ""
-          echo "✅ Blocklists updated and pushed successfully"
-        fi
+          for category in adult malware mixed_adult ddos; do
+            echo "Testing $category..."
+            for file in output/adguard/$category/*; do
+              if [ -f "$file" ]; then
+                filename=$(basename "$file")
+                url="$base_url/$category/$filename"
+                if curl -s -f -I "$url" > /dev/null; then
+                  echo "✅ $url accessible"
+                else
+                  echo "❌ $url non accessible"
+                fi
+              fi
+            done
+          done
