@@ -1,0 +1,12 @@
+# Dépendances pour le convertisseur de listes noires
+aiohttp>=3.9.0
+PyYAML>=6.0.1
+aiofiles>=23.0.0
+
+# Pour les tests (optionnel)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# Outils de développement (optionnel)
+black>=23.0.0
+pylint>=2.17.0
