@@ -1,0 +1,29 @@
+source:
+  # URL corrigée basée sur l'analyse du projet stenley77
+  base_url: "ftp://ftp.ut-capitole.fr/pub/reseau/cache/squidguard_contrib/"
+
+output:
+  directory: "output/adguard"
+  max_file_size: 104857600  # 100MB limit for GitHub
+  generate_master: false
+
+categories:
+  - name: "adult"
+    title: "Adult Content - UT Capitole"
+    description: "Sites à contenu adulte bloqués par l'Université Toulouse 1 Capitole"
+    output_filename: "adguardhome_adult"
+
+  - name: "malware"
+    title: "Malware - UT Capitole"
+    description: "Sites malveillants identifiés par l'Université Toulouse 1 Capitole"
+    output_filename: "adguardhome_malware"
+
+  - name: "mixed_adult"
+    title: "Mixed Adult Content - UT Capitole"
+    description: "Contenu mixte adulte de l'Université Toulouse 1 Capitole"
+    output_filename: "adguardhome_mixed_adult"
+
+  - name: "ddos"
+    title: "DDoS Sources - UT Capitole"
+    description: "Sources de DDoS identifiées par l'Université Toulouse 1 Capitole"
+    output_filename: "adguardhome_ddos"
