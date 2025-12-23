@@ -38,8 +38,20 @@ jobs:
           mkdir -p output/adguard/mixed_adult
           mkdir -p output/adguard/ddos
 
+      - name: Download and setup converter script
+        run: |
+          # Le script est maintenant correct, pas besoin de le recréer
+          if [ -f "src/blacklist_converter.py" ]; then
+            echo "✅ Script convertisseur trouvé"
+            chmod +x src/blacklist_converter.py
+          else
+            echo "❌ Script convertisseur manquant"
+            exit 1
+          fi
+
       - name: Run blacklist converter
         run: |
+          cd ${{ github.workspace }}
           python src/blacklist_converter.py --verbose
         env:
           PYTHONPATH: ${{ github.workspace }}
